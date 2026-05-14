@@ -287,12 +287,13 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
   :root{--bg:#f5f6f8;--card:#fff;--line:#e4e7eb;--ink:#1a1d21;--muted:#6b7280;--accent:#1f6feb;}
   *{box-sizing:border-box;}
   body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--ink);}
-  header{background:var(--card);border-bottom:1px solid var(--line);padding:13px 20px;position:sticky;top:0;z-index:10;}
+  header{background:var(--card);border-bottom:1px solid var(--line);padding:13px 20px;position:sticky;top:0;z-index:20;}
   h1{margin:0;font-size:16px;}
   .sub{color:var(--muted);font-size:12px;margin-top:1px;}
   .controls{display:flex;gap:10px;margin-top:11px;flex-wrap:wrap;align-items:center;}
   .step{display:flex;align-items:center;gap:6px;}
   .step b{font-size:11px;color:var(--accent);background:#eaf1fe;border-radius:50%;width:17px;height:17px;display:inline-flex;align-items:center;justify-content:center;}
+  .dash{color:var(--muted);font-size:12px;}
   select,#q,#hl{padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px;background:#fff;}
   select:disabled,#q:disabled,#hl:disabled{background:#f1f2f4;color:#aab;cursor:not-allowed;}
   select{max-width:280px;}
@@ -302,7 +303,7 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
   #count{color:var(--muted);font-size:12px;white-space:nowrap;}
   main{padding:14px 20px 60px;}
   table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;}
-  thead th{position:sticky;top:100px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--line);background:#fafbfc;cursor:pointer;user-select:none;}
+  thead th{position:sticky;top:var(--header-h,110px);z-index:5;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--line);background:#fafbfc;cursor:pointer;user-select:none;}
   thead th:hover{color:var(--ink);}
   td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top;}
   td.hlcell{background:#fff3bf;}
@@ -330,7 +331,9 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
       <select id="type" disabled><option value="">Permit type&hellip;</option></select>
     </span>
     <span class="step"><b>2</b>
-      <select id="period" disabled><option value="">Time period&hellip;</option></select>
+      <select id="from" disabled><option value="">From year&hellip;</option></select>
+      <span class="dash">to</span>
+      <select id="to" disabled><option value="">To year&hellip;</option></select>
     </span>
     <input id="q" placeholder="search within &mdash; filters rows (space = AND)" autocomplete="off" spellcheck="false" disabled>
     <input id="hl" placeholder="highlight a word &mdash; keeps all rows (e.g. fiber)" autocomplete="off" spellcheck="false" disabled>
@@ -351,6 +354,12 @@ const NODATE = " nodate";
 
 const $ = id => document.getElementById(id);
 function esc(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// Pin the sticky table header exactly below the (variable-height) page header.
+function fitHeader(){
+  document.documentElement.style.setProperty(
+    "--header-h", document.querySelector("header").offsetHeight + "px");
+}
 
 // Render `raw` as safe HTML, wrapping any of `marks` ({t:lowercased term, cls}).
 function markup(raw, marks){
@@ -390,6 +399,7 @@ async function boot(){
     types.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
   $("thead").innerHTML = "<tr>" + SHOW.map(i => `<th data-c="${i}">${esc(HEADERS[i])}</th>`).join("") + "</tr>";
   $("type").disabled = false;
+  fitHeader();
   bind();
   prompt();
   $("type").focus();
@@ -397,7 +407,9 @@ async function boot(){
 
 function bind(){
   $("type").addEventListener("change", onType);
-  $("period").addEventListener("change", run);
+  $("from").addEventListener("change", run);
+  $("to").addEventListener("change", run);
+  window.addEventListener("resize", fitHeader);
   let t1, t2;
   $("q").addEventListener("input", () => { clearTimeout(t1); t1 = setTimeout(run, 140); });
   $("hl").addEventListener("input", () => { clearTimeout(t2); t2 = setTimeout(rerender, 120); });
@@ -406,7 +418,7 @@ function bind(){
     const c = +th.dataset.c;
     sortDir = (c === sortCol) ? -sortDir : (c === 2 ? -1 : 1);
     sortCol = c;
-    if($("type").value && $("period").value) run();
+    if($("type").value && $("from").value && $("to").value) run();
   });
   $("tbody").addEventListener("click", e => {
     const tr = e.target.closest("tr.row"); if(!tr) return;
@@ -419,45 +431,49 @@ function bind(){
 }
 
 function onType(){
-  const type = $("type").value, period = $("period");
+  const type = $("type").value, from = $("from"), to = $("to");
   $("q").value = ""; $("hl").value = "";
   if(!type){
-    period.innerHTML = '<option value="">Time period…</option>';
-    period.disabled = true; $("q").disabled = true; $("hl").disabled = true;
+    from.innerHTML = '<option value="">From year…</option>';
+    to.innerHTML = '<option value="">To year…</option>';
+    from.disabled = to.disabled = $("q").disabled = $("hl").disabled = true;
     prompt(); return;
   }
-  const years = [...new Set(ROWS.filter(r => r[0] === type).map(r => r._y))];
-  const real = years.filter(y => y !== NODATE).sort().reverse();
-  const opts = real.map(y => `<option value="${y}">${y}</option>`);
-  if(years.includes(NODATE)) opts.push(`<option value="${NODATE}">(no date on record)</option>`);
-  period.innerHTML = '<option value="">Time period…</option>' + opts.join("");
-  period.disabled = false;
+  // years available for this permit type, newest first (undated rows excluded)
+  const years = [...new Set(ROWS.filter(r => r[0] === type && r._y !== NODATE)
+                              .map(r => r._y))].sort().reverse();
+  const opts = years.map(y => `<option value="${y}">${y}</option>`).join("");
+  from.innerHTML = '<option value="">From year…</option>' + opts;
+  to.innerHTML = '<option value="">To year…</option>' + opts;
+  from.disabled = to.disabled = false;
   prompt();
 }
 
 function prompt(){
-  const type = $("type").value, period = $("period").value;
+  const type = $("type").value, from = $("from").value, to = $("to").value;
   $("tbl").hidden = true;
   if(!type){
     $("note").hidden = false;
     $("note").innerHTML = "Step <b>1</b>: choose a permit type above.";
     $("count").textContent = "";
-  } else if(!period){
+  } else if(!from || !to){
     $("note").hidden = false;
-    $("note").innerHTML = `Permit type <b>${esc(type)}</b> selected. Step <b>2</b>: choose a time period.`;
+    $("note").innerHTML = `Permit type <b>${esc(type)}</b> selected. Step <b>2</b>: choose a from-year and a to-year.`;
     $("count").textContent = "";
   }
 }
 
 function run(){
-  const type = $("type").value, period = $("period").value;
-  if(!type || !period){ prompt(); return; }
+  const type = $("type").value, fromV = $("from").value, toV = $("to").value;
+  if(!type || !fromV || !toV){ prompt(); return; }
+  const lo = fromV <= toV ? fromV : toV;          // forgiving if picked out of order
+  const hi = fromV <= toV ? toV : fromV;
   $("q").disabled = false; $("hl").disabled = false;
   const terms = $("q").value.toLowerCase().split(/\s+/).filter(Boolean);
   view = [];
   for(let i=0;i<ROWS.length;i++){
     const r = ROWS[i];
-    if(r[0] !== type || r._y !== period) continue;
+    if(r[0] !== type || r._y < lo || r._y > hi) continue;   // year range (string cmp; undated excluded)
     let ok = true;
     for(const t of terms){ if(!r._s.includes(t)){ ok = false; break; } }
     if(ok){ r._i = i; view.push(r); }
@@ -467,22 +483,25 @@ function run(){
     const bv = sortCol === 2 ? b._d : b[sortCol].toLowerCase();
     return av < bv ? -sortDir : av > bv ? sortDir : 0;
   });
-  rerender(type, period);
+  rerender(type, lo === hi ? lo : lo + "–" + hi);
 }
 
-function rerender(type, period){
+function rerender(type, span){
   type = typeof type === "string" ? type : $("type").value;
-  period = typeof period === "string" ? period : $("period").value;
-  if(!type || !period) return;
+  if(typeof span !== "string"){                        // called from the highlight box
+    const f = $("from").value, t = $("to").value;
+    if(!type || !f || !t) return;
+    const lo = f <= t ? f : t, hi = f <= t ? t : f;
+    span = lo === hi ? lo : lo + "–" + hi;
+  }
   const terms = $("q").value.toLowerCase().split(/\s+/).filter(Boolean);
   const hl = $("hl").value.toLowerCase().trim();
   const marks = terms.map(t => ({t, cls: ""}));
   if(hl) marks.push({t: hl, cls: "hl"});
 
   const n = view.length;
-  const per = period === NODATE ? "no date" : period;
   let label = (n > LIMIT ? `${n.toLocaleString()} permits — showing first ${LIMIT}`
-                         : `${n.toLocaleString()} permit${n===1?"":"s"}`) + ` · ${type} · ${per}`;
+                         : `${n.toLocaleString()} permit${n===1?"":"s"}`) + ` · ${type} · ${span}`;
   if(hl){
     const hits = view.filter(r => r._s.includes(hl)).length;
     label += ` · ${hits.toLocaleString()} contain “${hl}”`;
