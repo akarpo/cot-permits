@@ -33,14 +33,8 @@ stop condition), `--margin N` (stop after N consecutive all-known pages; default
 
 ## One-time setup (GitHub + Cloudflare)
 
-The repo is already `git init`'d with a first commit. To publish:
-
-1. **Create the GitHub repo and push** (do this yourself):
-   ```bash
-   gh repo create cot-permits --private --source=. --remote=origin
-   git push -u origin main
-   ```
-   (or create it on github.com, then `git remote add origin <url>` and `git push -u origin main`)
+1. **GitHub repo** — published (public) at <https://github.com/akarpo/cot-permits>.
+   `origin` is configured, so `git push` from this folder publishes updates.
 2. **Connect Cloudflare Pages**: Cloudflare dashboard → Workers & Pages → Create →
    Pages → Connect to Git → pick this repo. Build settings: framework preset
    **none**, build command **(empty)**, output directory **`/`** (root). Deploy.
@@ -60,9 +54,9 @@ The repo is already `git init`'d with a first commit. To publish:
 
 ## The search UI
 
-- **Two required selectors**: pick a **Permit Type**, then a **Time period
-  (year)** — the year list cascades from the chosen type. The table appears
-  only once both are set.
+- **Two required steps**: pick a **Permit Type**, then a **From-year** and a
+  **To-year** — the year lists cascade from the chosen type. The table appears
+  only once the type and both years are set.
 - **Search box** — filters rows to matches (space-separated terms are AND).
 - **Highlight box** — background-highlights every cell containing a word (e.g.
   `fiber`) *without* hiding other rows, so you can scan matches in context.
@@ -78,8 +72,3 @@ The repo is already `git init`'d with a first commit. To publish:
   run; run `git gc` or squash history occasionally if that ever matters.
 - Needs a current browser (uses native `DecompressionStream` — Safari 16.4+,
   current Chrome/Firefox).
-
-## Related
-
-Sibling City-of-Troy research projects in `~/Downloads/`: `cot-celltower`
-(AT&T tower / Boulan Park inquiry), `cot-it` (IT spend from ACFRs).
