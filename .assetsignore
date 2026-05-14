@@ -1,0 +1,10 @@
+# Cloudflare Pages: only index.html should be served as the site.
+# Everything else in the repo is tooling, not web content.
+*.py
+*.db
+*.xlsx
+README.md
+.gitignore
+.assetsignore
+__pycache__/
+.DS_Store

@@ -1,0 +1,15 @@
+# Local working cache — regenerated from index.html by update_permits.py.
+# index.html is the portable source of truth, so the .db never needs to be committed.
+permits.db
+permits.db-journal
+permits.db-wal
+
+# Raw scrape exports live in ~/Downloads, not in the repo
+troy_permits_*.xlsx
+*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+
+.DS_Store
