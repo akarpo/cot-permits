@@ -8,7 +8,8 @@ on:
   workflow_dispatch: {}  # manual run button in the Actions tab
 
 permissions:
-  contents: write  # needed for the bot to commit back to main
+  contents: write   # bot commits regenerated index.html back to main
+  issues: write     # verifier opens an issue if BSA GUIDs drift
 
 concurrency:
   group: update-permits
@@ -17,7 +18,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml
 
-      - name: Run incremental update
+      - name: Run incremental update (scrape Troy + resolve BSA GUIDs)
         run: python update_permits.py --no-git
 
       - name: Commit and push if index.html changed
@@ -44,3 +45,37 @@ jobs:
           git add index.html
           git commit -m "chore: update permits ($(date -u +%Y-%m-%d))"
           git push
+
+      - name: Verify BSA GUIDs (daily spot-check)
+        id: verify
+        if: success() || failure()
+        continue-on-error: true
+        run: |
+          set +e
+          python verify_bsa_guids.py
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update issue if BSA GUIDs drifted
+        if: steps.verify.outputs.rc == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Reuse an existing open issue if one is already open — avoid spam.
+          existing=$(gh issue list \
+                       --state open \
+                       --search 'in:title "BSA GUID verification failed"' \
+                       --json number --jq '.[0].number' || echo "")
+          {
+            cat verify-report.txt
+            echo ""
+            echo "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > issue_body.txt
+          if [ -n "$existing" ]; then
+            echo "Commenting on existing issue #$existing"
+            gh issue comment "$existing" --body-file issue_body.txt
+          else
+            echo "Opening new issue"
+            gh issue create \
+              --title "BSA GUID verification failed ($(date -u +%Y-%m-%d))" \
+              --body-file issue_body.txt
+          fi
