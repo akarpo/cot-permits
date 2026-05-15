@@ -347,6 +347,9 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
   details.multi label:hover{background:#f0f6ff;}
   details.multi label input{margin:0;}
   details.multi label.all{border-bottom:1px solid var(--line);margin-bottom:4px;padding-bottom:6px;font-weight:600;}
+  /* permit-number -> BSA Online lookup link */
+  td a.bsa{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);}
+  td a.bsa:hover{background:#eaf1fe;}
 </style>
 </head>
 <body>
@@ -380,6 +383,7 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 let B64 = "__DATA__";
 const LIMIT = 1000;
+const BSA_URL = "https://bsaonline.com/SiteSearch/BuildingDepartmentRecordSearch?uid=406";
 let HEADERS = [], ROWS = [], view = [];
 let sortCol = 2, sortDir = -1;          // default: Date Issued, descending
 const SHOW = [0, 1, 2, 3, 4, 10];       // columns shown in the table
@@ -462,6 +466,12 @@ function bind(){
     if(selectedTypes.size > 0 && $("from").value && $("to").value) run();
   });
   $("tbody").addEventListener("click", e => {
+    // BSA lookup link: copy permit number to clipboard, then let the link open in a new tab.
+    const a = e.target.closest("a.bsa");
+    if(a){
+      if(navigator.clipboard && a.dataset.pn) navigator.clipboard.writeText(a.dataset.pn).catch(() => {});
+      return;
+    }
     const tr = e.target.closest("tr.row"); if(!tr) return;
     const nxt = tr.nextElementSibling;
     if(nxt && nxt.classList.contains("detail")){ nxt.remove(); return; }
@@ -599,7 +609,11 @@ function rerender(type, span){
       const raw = r[c];
       let cls = c === 10 ? "desc" : (c === 2 ? "nowrap" : "");
       if(hl && raw.toLowerCase().includes(hl)) cls += " hlcell";
-      return `<td class="${cls}">${markup(raw, marks)}</td>`;
+      const inner = markup(raw, marks);
+      if(c === 1 && raw){
+        return `<td class="${cls}"><a class="bsa" href="${BSA_URL}#${encodeURIComponent(raw)}" target="_blank" rel="noopener noreferrer" data-pn="${esc(raw)}" title="Open BSA Online search (permit number copied to clipboard)">${inner}</a></td>`;
+      }
+      return `<td class="${cls}">${inner}</td>`;
     }).join("");
     return `<tr class="row" data-i="${r._i}">${cells}</tr>`;
   });
