@@ -325,6 +325,28 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
   mark.hl{background:#ffd43b;padding:0 1px;border-radius:2px;}
   .note{padding:44px 20px;text-align:center;color:var(--muted);}
   .note b{color:var(--ink);}
+  /* multi-select permit type dropdown */
+  details.multi{position:relative;}
+  details.multi > summary{
+    list-style:none;cursor:pointer;display:inline-block;min-width:200px;max-width:340px;
+    padding:8px 26px 8px 10px;border:1px solid var(--line);border-radius:7px;background:#fff;
+    font-size:13px;position:relative;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  details.multi > summary::-webkit-details-marker{display:none;}
+  details.multi > summary::after{
+    content:"\25BE";position:absolute;right:9px;top:50%;transform:translateY(-50%);color:var(--muted);
+  }
+  details.multi[open] > summary{outline:2px solid var(--accent);outline-offset:-1px;}
+  details.multi.loading > summary{background:#f1f2f4;color:#aab;cursor:not-allowed;pointer-events:none;}
+  details.multi .panel{
+    position:absolute;top:calc(100% + 4px);left:0;z-index:30;background:#fff;
+    border:1px solid var(--line);border-radius:7px;padding:6px;
+    box-shadow:0 6px 18px rgba(0,0,0,.08);max-height:420px;overflow:auto;min-width:280px;
+  }
+  details.multi label{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;cursor:pointer;font-size:13px;}
+  details.multi label:hover{background:#f0f6ff;}
+  details.multi label input{margin:0;}
+  details.multi label.all{border-bottom:1px solid var(--line);margin-bottom:4px;padding-bottom:6px;font-weight:600;}
 </style>
 </head>
 <body>
@@ -333,7 +355,13 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
   <div class="sub">__COUNT__ permits &middot; scraped from apps.troymi.gov &middot; works fully offline</div>
   <div class="controls">
     <span class="step"><b>1</b>
-      <select id="type" disabled><option value="">Permit type&hellip;</option></select>
+      <details class="multi loading" id="typewrap">
+        <summary id="typesummary">Loading permits&hellip;</summary>
+        <div class="panel">
+          <label class="all"><input type="checkbox" id="typeall"><span>All types</span></label>
+          <div id="typeopts"></div>
+        </div>
+      </details>
     </span>
     <span class="step"><b>2</b>
       <select id="from" disabled><option value="">From year&hellip;</option></select>
@@ -356,6 +384,8 @@ let HEADERS = [], ROWS = [], view = [];
 let sortCol = 2, sortDir = -1;          // default: Date Issued, descending
 const SHOW = [0, 1, 2, 3, 4, 10];       // columns shown in the table
 const NODATE = " nodate";
+let ALL_TYPES = [];                      // every distinct permit type, sorted
+let selectedTypes = new Set();           // currently checked types
 
 const $ = id => document.getElementById(id);
 function esc(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -398,20 +428,26 @@ async function boot(){
     r._d = Date.parse(r[2]) || 0;
     r._y = r._d ? String(new Date(r._d).getUTCFullYear()) : NODATE;
   }
-  const types = [...new Set(ROWS.map(r => r[0]))].filter(Boolean)
+  ALL_TYPES = [...new Set(ROWS.map(r => r[0]))].filter(Boolean)
                   .sort((a,b) => a.localeCompare(b));
-  $("type").innerHTML = '<option value="">Permit type…</option>' +
-    types.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+  $("typeopts").innerHTML = ALL_TYPES.map(t =>
+    `<label><input type="checkbox" class="typechk" value="${esc(t)}"><span>${esc(t)}</span></label>`).join("");
   $("thead").innerHTML = "<tr>" + SHOW.map(i => `<th data-c="${i}">${esc(HEADERS[i])}</th>`).join("") + "</tr>";
-  $("type").disabled = false;
+  $("typewrap").classList.remove("loading");
+  $("typesummary").textContent = "Permit type…";
   fitHeader();
   bind();
   prompt();
-  $("type").focus();
 }
 
 function bind(){
-  $("type").addEventListener("change", onType);
+  $("typeall").addEventListener("change", onTypeAll);
+  $("typeopts").addEventListener("change", onTypeCheck);
+  // Close the dropdown when clicking outside it.
+  document.addEventListener("click", e => {
+    const w = $("typewrap");
+    if(w.open && !w.contains(e.target)) w.open = false;
+  });
   $("from").addEventListener("change", run);
   $("to").addEventListener("change", run);
   window.addEventListener("resize", fitHeader);
@@ -423,7 +459,7 @@ function bind(){
     const c = +th.dataset.c;
     sortDir = (c === sortCol) ? -sortDir : (c === 2 ? -1 : 1);
     sortCol = c;
-    if($("type").value && $("from").value && $("to").value) run();
+    if(selectedTypes.size > 0 && $("from").value && $("to").value) run();
   });
   $("tbody").addEventListener("click", e => {
     const tr = e.target.closest("tr.row"); if(!tr) return;
@@ -435,42 +471,83 @@ function bind(){
   });
 }
 
-function onType(){
-  const type = $("type").value, from = $("from"), to = $("to");
-  $("q").value = ""; $("hl").value = "";
-  if(!type){
+function syncSelectedTypes(){
+  selectedTypes = new Set();
+  for(const cb of document.querySelectorAll(".typechk")) if(cb.checked) selectedTypes.add(cb.value);
+}
+
+function onTypeAll(){
+  const checked = $("typeall").checked;
+  for(const cb of document.querySelectorAll(".typechk")) cb.checked = checked;
+  $("typeall").indeterminate = false;
+  syncSelectedTypes();
+  onTypeUpdate();
+}
+
+function onTypeCheck(e){
+  if(!e.target.matches(".typechk")) return;
+  syncSelectedTypes();
+  const all = $("typeall");
+  all.checked = selectedTypes.size === ALL_TYPES.length;
+  all.indeterminate = selectedTypes.size > 0 && selectedTypes.size < ALL_TYPES.length;
+  onTypeUpdate();
+}
+
+function typeLabel(){
+  const n = selectedTypes.size, total = ALL_TYPES.length;
+  if(n === 0) return "";
+  if(n === total) return "All types";
+  if(n === 1) return [...selectedTypes][0];
+  return `${n} types`;
+}
+
+function onTypeUpdate(){
+  // Refresh the summary text in the dropdown button.
+  $("typesummary").textContent = selectedTypes.size === 0 ? "Permit type…" : typeLabel();
+
+  const from = $("from"), to = $("to");
+  if(selectedTypes.size === 0){
     from.innerHTML = '<option value="">From year…</option>';
     to.innerHTML = '<option value="">To year…</option>';
     from.disabled = to.disabled = $("q").disabled = $("hl").disabled = true;
     prompt(); return;
   }
-  // years available for this permit type, newest first (undated rows excluded)
-  const years = [...new Set(ROWS.filter(r => r[0] === type && r._y !== NODATE)
+  // Year list = union of years across all selected types (undated rows excluded).
+  const prevFrom = from.value, prevTo = to.value;
+  const years = [...new Set(ROWS.filter(r => selectedTypes.has(r[0]) && r._y !== NODATE)
                               .map(r => r._y))].sort().reverse();
   const opts = years.map(y => `<option value="${y}">${y}</option>`).join("");
   from.innerHTML = '<option value="">From year…</option>' + opts;
   to.innerHTML = '<option value="">To year…</option>' + opts;
   from.disabled = to.disabled = false;
-  prompt();
+  // Preserve any year selection that's still valid for the new type set.
+  if(years.includes(prevFrom)) from.value = prevFrom;
+  if(years.includes(prevTo))   to.value   = prevTo;
+  if(from.value && to.value) run(); else prompt();
 }
 
 function prompt(){
-  const type = $("type").value, from = $("from").value, to = $("to").value;
+  const fromV = $("from").value, toV = $("to").value;
   $("tbl").hidden = true;
-  if(!type){
+  if(selectedTypes.size === 0){
     $("note").hidden = false;
-    $("note").innerHTML = "Step <b>1</b>: choose a permit type above.";
+    $("note").innerHTML = "Step <b>1</b>: choose one or more permit types above (or pick <b>All types</b>).";
     $("count").textContent = "";
-  } else if(!from || !to){
+  } else if(!fromV || !toV){
     $("note").hidden = false;
-    $("note").innerHTML = `Permit type <b>${esc(type)}</b> selected. Step <b>2</b>: choose a from-year and a to-year.`;
+    const n = selectedTypes.size, total = ALL_TYPES.length;
+    let what;
+    if(n === total)     what = "<b>All types</b>";
+    else if(n === 1)    what = `Permit type <b>${esc([...selectedTypes][0])}</b>`;
+    else                what = `<b>${n} permit types</b>`;
+    $("note").innerHTML = `${what} selected. Step <b>2</b>: choose a from-year and a to-year.`;
     $("count").textContent = "";
   }
 }
 
 function run(){
-  const type = $("type").value, fromV = $("from").value, toV = $("to").value;
-  if(!type || !fromV || !toV){ prompt(); return; }
+  const fromV = $("from").value, toV = $("to").value;
+  if(selectedTypes.size === 0 || !fromV || !toV){ prompt(); return; }
   const lo = fromV <= toV ? fromV : toV;          // forgiving if picked out of order
   const hi = fromV <= toV ? toV : fromV;
   $("q").disabled = false; $("hl").disabled = false;
@@ -478,7 +555,7 @@ function run(){
   view = [];
   for(let i=0;i<ROWS.length;i++){
     const r = ROWS[i];
-    if(r[0] !== type || r._y < lo || r._y > hi) continue;   // year range (string cmp; undated excluded)
+    if(!selectedTypes.has(r[0]) || r._y < lo || r._y > hi) continue;   // year range (string cmp; undated excluded)
     let ok = true;
     for(const t of terms){ if(!r._s.includes(t)){ ok = false; break; } }
     if(ok){ r._i = i; view.push(r); }
@@ -488,14 +565,14 @@ function run(){
     const bv = sortCol === 2 ? b._d : b[sortCol].toLowerCase();
     return av < bv ? -sortDir : av > bv ? sortDir : 0;
   });
-  rerender(type, lo === hi ? lo : lo + "–" + hi);
+  rerender(typeLabel(), lo === hi ? lo : lo + "–" + hi);
 }
 
 function rerender(type, span){
-  type = typeof type === "string" ? type : $("type").value;
+  type = typeof type === "string" ? type : typeLabel();
   if(typeof span !== "string"){                        // called from the highlight box
     const f = $("from").value, t = $("to").value;
-    if(!type || !f || !t) return;
+    if(selectedTypes.size === 0 || !f || !t) return;
     const lo = f <= t ? f : t, hi = f <= t ? t : f;
     span = lo === hi ? lo : lo + "–" + hi;
   }
