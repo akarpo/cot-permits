@@ -302,8 +302,13 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
   #q:focus,#hl:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px;}
   #count{color:var(--muted);font-size:12px;white-space:nowrap;}
   main{padding:14px 20px 60px;}
-  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;}
-  thead th{position:sticky;top:var(--header-h,110px);z-index:5;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--line);background:#fafbfc;cursor:pointer;user-select:none;}
+  /* no overflow:hidden here — it would make the table a scroll container and
+     break position:sticky on thead (the header would anchor to the table). */
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;}
+  /* sticky on <thead>, not <th>: sticky on individual header cells does not
+     engage here; on the row group it pins reliably below the page header. */
+  thead{position:sticky;top:var(--header-h,110px);z-index:5;}
+  thead th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--line);background:#fafbfc;cursor:pointer;user-select:none;}
   thead th:hover{color:var(--ink);}
   td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top;}
   td.hlcell{background:#fff3bf;}
@@ -507,6 +512,7 @@ function rerender(type, span){
     label += ` · ${hits.toLocaleString()} contain “${hl}”`;
   }
   $("count").textContent = label;
+  fitHeader();                 // #count text can re-wrap the controls -> header height changes
   $("note").hidden = true;
   $("tbl").hidden = false;
   if(!n){ $("tbody").innerHTML = `<tr><td colspan="${SHOW.length}" class="note">no permits match</td></tr>`; return; }
