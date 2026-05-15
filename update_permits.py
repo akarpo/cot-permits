@@ -119,8 +119,16 @@ def open_db():
             {DB_COLS[0]} TEXT, {DB_COLS[2]} TEXT, {DB_COLS[3]} TEXT, {DB_COLS[4]} TEXT,
             {DB_COLS[5]} TEXT, {DB_COLS[6]} TEXT, {DB_COLS[7]} TEXT, {DB_COLS[8]} TEXT,
             {DB_COLS[9]} TEXT, {DB_COLS[10]} TEXT, {DB_COLS[11]} TEXT,
-            first_seen TEXT
+            first_seen TEXT,
+            bsa_guid TEXT,
+            bsa_resolved_at TEXT
         )""")
+    # Idempotent migration: add columns if upgrading an older DB.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(permits)").fetchall()}
+    if "bsa_guid" not in cols:
+        conn.execute("ALTER TABLE permits ADD COLUMN bsa_guid TEXT")
+    if "bsa_resolved_at" not in cols:
+        conn.execute("ALTER TABLE permits ADD COLUMN bsa_resolved_at TEXT")
     conn.commit()
     return conn
 
@@ -146,7 +154,9 @@ def insert_rows(conn, rows):
 
 
 def bootstrap_from_index(conn):
-    """Populate an empty DB from the gzipped data embedded in index.html."""
+    """Populate an empty DB from the gzipped data embedded in index.html.
+    Also restores prior BSA GUID resolver state from the 13th column tristate
+    (see generate_index docstring) so CI runs don't re-resolve every permit."""
     if not os.path.exists(INDEX_PATH):
         return 0
     html = open(INDEX_PATH, encoding="utf-8").read()
@@ -156,6 +166,31 @@ def bootstrap_from_index(conn):
     data = json.loads(gzip.decompress(base64.b64decode(m.group(1))))
     n = insert_rows(conn, data["rows"])
     print(f"  bootstrapped {n:,} permits from index.html")
+
+    # Replay the resolver-state tristate from the 13th column, if present.
+    restored_guids = restored_misses = 0
+    updates = []
+    for r in data["rows"]:
+        if len(r) < 13:
+            continue
+        marker = r[12]
+        pn = r[PERMIT_NO_IDX]
+        if not marker:
+            continue                               # never tried — leave NULL
+        if marker == "-":
+            updates.append((None, "bootstrap", pn))
+            restored_misses += 1
+        elif len(marker) == 36 and "-" in marker:  # cheap GUID shape check
+            updates.append((marker, "bootstrap", pn))
+            restored_guids += 1
+    if updates:
+        conn.executemany(
+            "UPDATE permits SET bsa_guid=?, bsa_resolved_at=? WHERE permit_number=?",
+            updates,
+        )
+        conn.commit()
+        print(f"  restored BSA state: {restored_guids:,} GUIDs, "
+              f"{restored_misses:,} confirmed-misses")
     return n
 
 
@@ -189,14 +224,166 @@ def update_from_troy(conn, session, margin, full):
     return new_total
 
 
+# --------------------------------------- BSA Online (bsaonline.com) lookup ---
+# Resolves Troy permit numbers to BSA Online record GUIDs by driving their
+# advanced-record-search wizard end-to-end. The wizard isn't a documented API,
+# so this is best-effort: it may break if BSA changes their JS. The daily
+# verify_bsa_guids.py spot-check guards against silent drift.
+BSA_BASE        = "https://bsaonline.com"
+BSA_UID         = 406  # City of Troy
+BSA_SEARCH_URL  = f"{BSA_BASE}/SiteSearch/BuildingDepartmentRecordSearch?uid={BSA_UID}"
+BSA_RESULTS_URL = f"{BSA_BASE}/SiteSearch/GetPageOfFindRecordSearchResultsPartialView"
+BSA_DETAIL_URL  = f"{BSA_BASE}/CD_RecordDetails/Permit"  # ?permitId=<GUID>&uid=406
+
+# Bootstrap uses normal browser headers (the wizard JS only sends AJAX-style
+# headers *after* the page loads); subsequent search calls add the AJAX flag.
+BSA_BOOTSTRAP_HEADERS = {
+    "User-Agent": HEADERS["User-Agent"],
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+BSA_AJAX_HEADERS = {
+    "User-Agent": HEADERS["User-Agent"],
+    "Accept": "text/html, */*; q=0.01",
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": BSA_SEARCH_URL,
+}
+_BSA_GUID_RE = re.compile(
+    r"gotToRecord\(\s*'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'",
+    re.I,
+)
+_BSA_SESSION_RE = re.compile(r'AdvancedRecordSearchSessionGuid[^v]*value="([^"]+)"')
+
+
+class BsaResolver:
+    """Resolves Troy permit numbers to BSA record GUIDs. One bootstrap per
+    session — the AdvancedRecordSearchSessionGuid is reusable for many lookups.
+    Re-bootstraps automatically on transient failure or session expiry."""
+
+    def __init__(self, throttle=0.6):
+        self.session = requests.Session()
+        self.sg = None
+        self.throttle = throttle
+        self._last_call = 0.0
+        self.lookups = 0
+        self.resolved = 0
+
+    def _bootstrap(self):
+        r = self.session.get(BSA_SEARCH_URL, headers=BSA_BOOTSTRAP_HEADERS, timeout=20)
+        r.raise_for_status()
+        m = _BSA_SESSION_RE.search(r.text)
+        if not m:
+            raise RuntimeError("BSA: could not extract AdvancedRecordSearchSessionGuid")
+        self.sg = m.group(1)
+        # Subsequent calls are XHRs; set defaults on the session.
+        self.session.headers.update(BSA_AJAX_HEADERS)
+
+    def _sleep(self):
+        elapsed = time.time() - self._last_call
+        if elapsed < self.throttle:
+            time.sleep(self.throttle - elapsed)
+        self._last_call = time.time()
+
+    def resolve(self, permit_number, _retry=True):
+        """Return the BSA record GUID for `permit_number`, or None if no match."""
+        if not self.sg:
+            self._bootstrap()
+        self._sleep()
+        self.lookups += 1
+        try:
+            r = self.session.get(BSA_RESULTS_URL, params={
+                "advancedRecordSearchSessionGuid": self.sg,
+                "currentPage": 1,
+                "searchText": permit_number,
+                "bsaOnlineSiteSearchType": 6,  # Record Number tab
+            }, timeout=25)
+            r.raise_for_status()
+        except requests.RequestException:
+            if _retry:
+                self.sg = None
+                return self.resolve(permit_number, _retry=False)
+            return None
+        m = _BSA_GUID_RE.search(r.text)
+        if m:
+            self.resolved += 1
+            return m.group(1)
+        # No GUID — either permit isn't in BSA or our session lapsed.
+        if _retry and len(r.text) < 400:
+            self.sg = None
+            return self.resolve(permit_number, _retry=False)
+        return None
+
+
+def resolve_missing_guids(conn, resolver, limit=None, batch=50, retry_misses=False):
+    """Find permits we haven't tried BSA-resolving yet, resolve them, persist
+    back to DB. Returns (attempted, newly_resolved). Commits every `batch`
+    lookups so a long backfill survives Ctrl-C / runner timeout.
+
+    Skips permits we've already attempted (bsa_resolved_at IS NOT NULL),
+    even if the prior attempt didn't find a match — use retry_misses=True
+    to retry the no-match ones."""
+    cond = "bsa_resolved_at IS NULL" if not retry_misses else "bsa_guid IS NULL"
+    # Resolve newly-scraped permits first (highest first_seen). Permit-number
+    # DESC is a tiebreaker for the bootstrap case where everything shares one
+    # first_seen — within a prefix it's approximately recency.
+    q = (f"SELECT permit_number FROM permits WHERE {cond} "
+         f"ORDER BY first_seen DESC, permit_number DESC")
+    if limit is not None:
+        q += f" LIMIT {int(limit)}"
+    pending = [row[0] for row in conn.execute(q)]
+    if not pending:
+        print("  no permits need BSA GUID resolution")
+        return 0, 0
+    print(f"  resolving BSA GUIDs for {len(pending):,} permit(s)...")
+    now = datetime.now().isoformat(timespec="seconds")
+    found = attempted = 0
+    pending_writes = []
+    for pn in pending:
+        try:
+            guid = resolver.resolve(pn)
+        except Exception as e:                          # noqa: BLE001 — keep going
+            print(f"    resolve {pn} failed: {e}", file=sys.stderr)
+            guid = None
+        attempted += 1
+        if guid:
+            found += 1
+            pending_writes.append((guid, now, pn))
+        else:
+            pending_writes.append((None, now, pn))      # record the attempt
+        if len(pending_writes) >= batch:
+            conn.executemany(
+                "UPDATE permits SET bsa_guid=?, bsa_resolved_at=? WHERE permit_number=?",
+                pending_writes,
+            )
+            conn.commit()
+            pending_writes.clear()
+            print(f"    progress: {attempted:,}/{len(pending):,} attempted, {found:,} resolved")
+    if pending_writes:
+        conn.executemany(
+            "UPDATE permits SET bsa_guid=?, bsa_resolved_at=? WHERE permit_number=?",
+            pending_writes,
+        )
+        conn.commit()
+    print(f"  BSA resolver: {found:,}/{attempted:,} resolved "
+          f"(total session lookups={resolver.lookups})")
+    return attempted, found
+
+
 # ------------------------------------------------------- index.html output ---
 def generate_index(conn):
     # explicit ORDER BY: a bare SELECT's row order is unspecified in SQLite, so
     # ordering by the primary key keeps index.html byte-deterministic run to run.
+    # bsa_guid is appended as a 13th column; HEADERS stays at 12, so it
+    # silently powers the deep-link without showing up in any visible row.
+    # 13th column is a tristate so bootstrap_from_index can preserve resolver
+    # state across CI runs (permits.db is gitignored, so index.html *is* the
+    # cross-run store): a full GUID = resolved, '-' = tried but not in BSA,
+    # '' = never tried.
     rows = [list(r) for r in conn.execute(
         f"SELECT {DB_COLS[0]},{DB_COLS[1]},{DB_COLS[2]},{DB_COLS[3]},{DB_COLS[4]},"
         f"{DB_COLS[5]},{DB_COLS[6]},{DB_COLS[7]},{DB_COLS[8]},{DB_COLS[9]},"
-        f"{DB_COLS[10]},{DB_COLS[11]} FROM permits ORDER BY {DB_COLS[1]}")]
+        f"{DB_COLS[10]},{DB_COLS[11]},"
+        f"COALESCE(bsa_guid, CASE WHEN bsa_resolved_at IS NULL THEN '' ELSE '-' END) "
+        f"FROM permits ORDER BY {DB_COLS[1]}")]
     payload = json.dumps({"headers": COLUMNS, "rows": rows}, separators=(",", ":")).encode()
     b64 = base64.b64encode(gzip.compress(payload, 9)).decode()
     assert json.loads(gzip.decompress(base64.b64decode(b64)))["rows"][:1] == rows[:1]
@@ -243,6 +430,14 @@ def main():
     ap.add_argument("--full", action="store_true", help="scrape every page (ignore stop condition)")
     ap.add_argument("--margin", type=int, default=4,
                     help="stop after N consecutive all-known pages (default 4)")
+    ap.add_argument("--no-guids", action="store_true",
+                    help="skip BSA Online GUID resolution this run")
+    ap.add_argument("--backfill-guids", action="store_true",
+                    help="resolve BSA GUIDs for every permit missing one (long-running)")
+    ap.add_argument("--guid-limit", type=int, default=500,
+                    help="cap BSA GUID lookups per run (default 500; 0 = unlimited)")
+    ap.add_argument("--retry-guid-misses", action="store_true",
+                    help="re-attempt permits where a prior BSA lookup found no match")
     args = ap.parse_args()
 
     print("opening datastore...")
@@ -264,6 +459,18 @@ def main():
         n_new = count_permits(conn) - have
     total = count_permits(conn)
     print(f"  +{n_new} new permits — {total:,} total")
+
+    if not args.no_guids:
+        print("resolving BSA Online GUIDs...")
+        resolver = BsaResolver(throttle=0.6)
+        limit = None if (args.backfill_guids or args.guid_limit == 0) else args.guid_limit
+        try:
+            resolve_missing_guids(conn, resolver, limit=limit,
+                                  retry_misses=args.retry_guid_misses)
+        except Exception as e:                          # noqa: BLE001
+            print(f"  GUID resolver aborted: {e} — continuing", file=sys.stderr)
+    else:
+        print("--no-guids: skipping BSA GUID resolution")
 
     print("regenerating index.html...")
     generate_index(conn)
@@ -383,7 +590,8 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 let B64 = "__DATA__";
 const LIMIT = 1000;
-const BSA_URL = "https://bsaonline.com/SiteSearch/BuildingDepartmentRecordSearch?uid=406";
+const BSA_URL    = "https://bsaonline.com/SiteSearch/BuildingDepartmentRecordSearch?uid=406";
+const BSA_DETAIL = "https://bsaonline.com/CD_RecordDetails/Permit?uid=406&permitId=";
 let HEADERS = [], ROWS = [], view = [];
 let sortCol = 2, sortDir = -1;          // default: Date Issued, descending
 const SHOW = [0, 1, 2, 3, 4, 10];       // columns shown in the table
@@ -466,10 +674,14 @@ function bind(){
     if(selectedTypes.size > 0 && $("from").value && $("to").value) run();
   });
   $("tbody").addEventListener("click", e => {
-    // BSA lookup link: copy permit number to clipboard, then let the link open in a new tab.
+    // BSA lookup link: when we have no GUID (search-wizard fallback), copy
+    // the permit number to clipboard so the user can paste it on the BSA page.
+    // When we have a GUID, the link goes straight to the record — no copy needed.
     const a = e.target.closest("a.bsa");
     if(a){
-      if(navigator.clipboard && a.dataset.pn) navigator.clipboard.writeText(a.dataset.pn).catch(() => {});
+      if(a.dataset.pn && navigator.clipboard){
+        navigator.clipboard.writeText(a.dataset.pn).catch(() => {});
+      }
       return;
     }
     const tr = e.target.closest("tr.row"); if(!tr) return;
@@ -611,7 +823,16 @@ function rerender(type, span){
       if(hl && raw.toLowerCase().includes(hl)) cls += " hlcell";
       const inner = markup(raw, marks);
       if(c === 1 && raw){
-        return `<td class="${cls}"><a class="bsa" href="${BSA_URL}#${encodeURIComponent(raw)}" target="_blank" rel="noopener noreferrer" data-pn="${esc(raw)}" title="Open BSA Online search (permit number copied to clipboard)">${inner}</a></td>`;
+        // r[12] is the BSA tristate: full GUID -> direct deep-link; '-' or ''
+        // -> fallback to the search-wizard URL + clipboard-copy helper.
+        const guid = r[12];
+        const direct = guid && guid.length === 36 && guid !== "-";
+        const href = direct ? `${BSA_DETAIL}${encodeURIComponent(guid)}`
+                            : `${BSA_URL}#${encodeURIComponent(raw)}`;
+        const title = direct ? `Open BSA Online record for ${raw}`
+                             : `Open BSA Online search (permit number copied to clipboard)`;
+        const dataPn = direct ? "" : ` data-pn="${esc(raw)}"`;
+        return `<td class="${cls}"><a class="bsa" href="${href}" target="_blank" rel="noopener noreferrer"${dataPn} title="${title}">${inner}</a></td>`;
       }
       return `<td class="${cls}">${inner}</td>`;
     }).join("");
