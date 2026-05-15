@@ -1,0 +1,47 @@
+name: Update permits
+
+on:
+  schedule:
+    # Daily at 11:17 UTC (~7:17 AM Eastern). Off-the-hour to avoid scheduler
+    # congestion on GitHub's runners.
+    - cron: '17 11 * * *'
+  workflow_dispatch: {}  # manual run button in the Actions tab
+
+permissions:
+  contents: write  # needed for the bot to commit back to main
+
+concurrency:
+  group: update-permits
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml
+
+      - name: Run incremental update
+        run: python update_permits.py --no-git
+
+      - name: Commit and push if index.html changed
+        run: |
+          if git diff --quiet -- index.html; then
+            echo "index.html unchanged — nothing to commit."
+            exit 0
+          fi
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html
+          git commit -m "chore: update permits ($(date -u +%Y-%m-%d))"
+          git push
