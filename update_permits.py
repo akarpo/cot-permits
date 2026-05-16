@@ -253,6 +253,23 @@ _BSA_GUID_RE = re.compile(
 )
 _BSA_SESSION_RE = re.compile(r'AdvancedRecordSearchSessionGuid[^v]*value="([^"]+)"')
 
+# Ordering for picking which unresolved permits to look up next. Newly-scraped
+# rows win on first_seen DESC. Within the bootstrap cohort (all share one
+# first_seen), we sort by date_issued — parsing the "MMM DD, YYYY" string in
+# SQL so we don't have to add a column. permit_number DESC is a final tiebreaker.
+BSA_RESOLVE_ORDER_BY = """
+ORDER BY
+  first_seen DESC,
+  substr(date_issued, -4) DESC,
+  CASE substr(date_issued, 1, 3)
+    WHEN 'Jan' THEN 1 WHEN 'Feb' THEN 2 WHEN 'Mar' THEN 3
+    WHEN 'Apr' THEN 4 WHEN 'May' THEN 5 WHEN 'Jun' THEN 6
+    WHEN 'Jul' THEN 7 WHEN 'Aug' THEN 8 WHEN 'Sep' THEN 9
+    WHEN 'Oct' THEN 10 WHEN 'Nov' THEN 11 WHEN 'Dec' THEN 12 END DESC,
+  CAST(replace(substr(date_issued, 5, 3), ',', '') AS INTEGER) DESC,
+  permit_number DESC
+"""
+
 
 class BsaResolver:
     """Resolves Troy permit numbers to BSA record GUIDs. One bootstrap per
@@ -285,9 +302,12 @@ class BsaResolver:
 
     def resolve(self, permit_number, _retry=True):
         """Return the BSA record GUID for `permit_number`, or None if no match."""
+        # Throttle BEFORE bootstrap too: if BSA is degraded, the bootstrap
+        # itself may raise on every call, and without this we'd spin the
+        # bootstrap URL with zero throttle and worsen the upstream's day.
+        self._sleep()
         if not self.sg:
             self._bootstrap()
-        self._sleep()
         self.lookups += 1
         try:
             r = self.session.get(BSA_RESULTS_URL, params={
@@ -322,11 +342,7 @@ def resolve_missing_guids(conn, resolver, limit=None, batch=50, retry_misses=Fal
     even if the prior attempt didn't find a match — use retry_misses=True
     to retry the no-match ones."""
     cond = "bsa_resolved_at IS NULL" if not retry_misses else "bsa_guid IS NULL"
-    # Resolve newly-scraped permits first (highest first_seen). Permit-number
-    # DESC is a tiebreaker for the bootstrap case where everything shares one
-    # first_seen — within a prefix it's approximately recency.
-    q = (f"SELECT permit_number FROM permits WHERE {cond} "
-         f"ORDER BY first_seen DESC, permit_number DESC")
+    q = f"SELECT permit_number FROM permits WHERE {cond} {BSA_RESOLVE_ORDER_BY}"
     if limit is not None:
         q += f" LIMIT {int(limit)}"
     pending = [row[0] for row in conn.execute(q)]
@@ -342,13 +358,14 @@ def resolve_missing_guids(conn, resolver, limit=None, batch=50, retry_misses=Fal
             guid = resolver.resolve(pn)
         except Exception as e:                          # noqa: BLE001 — keep going
             print(f"    resolve {pn} failed: {e}", file=sys.stderr)
-            guid = None
+            attempted += 1
+            continue   # HTTP error: leave bsa_resolved_at NULL so we retry.
         attempted += 1
         if guid:
             found += 1
             pending_writes.append((guid, now, pn))
         else:
-            pending_writes.append((None, now, pn))      # record the attempt
+            pending_writes.append((None, now, pn))      # genuine "not in BSA"
         if len(pending_writes) >= batch:
             conn.executemany(
                 "UPDATE permits SET bsa_guid=?, bsa_resolved_at=? WHERE permit_number=?",
