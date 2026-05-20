@@ -602,12 +602,17 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
   details.multi .panel{
     position:absolute;top:calc(100% + 4px);left:0;z-index:30;background:#fff;
     border:1px solid var(--line);border-radius:7px;padding:6px;
-    box-shadow:0 6px 18px rgba(0,0,0,.08);max-height:420px;overflow:auto;min-width:280px;
+    box-shadow:0 6px 18px rgba(0,0,0,.08);max-height:420px;min-width:280px;display:flex;flex-direction:column;
   }
-  details.multi label{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;cursor:pointer;font-size:13px;}
+  details.multi .panel .type-filter{
+    padding:6px;margin-bottom:4px;border:1px solid var(--line);border-radius:5px;font-size:13px;width:calc(100% - 12px);margin-left:6px;
+  }
+  details.multi .panel .type-filter:focus{outline:2px solid var(--accent);outline-offset:-1px;}
+  details.multi .type-list{overflow:auto;flex:1;}
+  details.multi label{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;cursor:pointer;font-size:13px;flex-direction:row-reverse;justify-content:space-between;}
   details.multi label:hover{background:#f0f6ff;}
   details.multi label input{margin:0;}
-  details.multi label.all{border-bottom:1px solid var(--line);margin-bottom:4px;padding-bottom:6px;font-weight:600;}
+  details.multi label.all{border-bottom:1px solid var(--line);margin-bottom:4px;padding-bottom:6px;font-weight:600;flex-direction:row;justify-content:flex-start;}
   /* permit-number -> BSA Online lookup link */
   td a.bsa{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);}
   td a.bsa:hover{background:#eaf1fe;}
@@ -622,8 +627,9 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
       <details class="multi loading" id="typewrap">
         <summary id="typesummary">Loading permits&hellip;</summary>
         <div class="panel">
+          <input type="text" class="type-filter" id="typefilter" placeholder="Filter types&hellip;" autocomplete="off" spellcheck="false">
           <label class="all"><input type="checkbox" id="typeall"><span>All types</span></label>
-          <div id="typeopts"></div>
+          <div class="type-list" id="typeopts"></div>
         </div>
       </details>
     </span>
@@ -708,9 +714,18 @@ async function boot(){
   prompt();
 }
 
+function filterTypes(){
+  const q = $("typefilter").value.toLowerCase().trim();
+  for(const lbl of $("typeopts").querySelectorAll("label")){
+    lbl.style.display = (!q || lbl.textContent.toLowerCase().includes(q)) ? "" : "none";
+  }
+}
+
 function bind(){
   $("typeall").addEventListener("change", onTypeAll);
   $("typeopts").addEventListener("change", onTypeCheck);
+  $("typefilter").addEventListener("input", filterTypes);
+  $("typefilter").addEventListener("keydown", e => e.stopPropagation());
   // Close the dropdown when clicking outside it.
   document.addEventListener("click", e => {
     const w = $("typewrap");
