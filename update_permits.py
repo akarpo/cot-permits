@@ -429,18 +429,18 @@ def generate_index(conn):
 
 # -------------------------------------------------------------- R2 upload ---
 def upload_to_r2():
-    result = subprocess.run(
-        ["wrangler", "r2", "object", "put", DATA_R2_DEST,
-         "--file", DATA_GZ_PATH,
-         "--content-type", "application/gzip",
-         "--remote"],
-        capture_output=True, text=True, check=False,
-    )
+    cmd = ["wrangler", "r2", "object", "put", DATA_R2_DEST,
+           "--file", DATA_GZ_PATH,
+           "--content-type", "application/gzip"]
+    if not os.environ.get("CLOUDFLARE_API_TOKEN"):
+        cmd.append("--remote")
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode == 0:
         print(f"  uploaded to R2: {DATA_R2_DEST}")
     else:
-        msg = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "?"
-        raise RuntimeError(f"R2 upload failed: {msg}")
+        print(f"  wrangler stdout: {result.stdout.strip()}", file=sys.stderr)
+        print(f"  wrangler stderr: {result.stderr.strip()}", file=sys.stderr)
+        raise RuntimeError("R2 upload failed (see wrangler output above)")
 
 
 # -------------------------------------------------------------------- git ---
