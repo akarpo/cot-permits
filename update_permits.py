@@ -482,8 +482,8 @@ def main():
                     help="skip BSA Online GUID resolution this run")
     ap.add_argument("--backfill-guids", action="store_true",
                     help="resolve BSA GUIDs for every permit missing one (long-running)")
-    ap.add_argument("--guid-limit", type=int, default=500,
-                    help="cap BSA GUID lookups per run (default 500; 0 = unlimited)")
+    ap.add_argument("--guid-limit", type=int, default=5000,
+                    help="cap BSA GUID lookups per run (default 5000; 0 = unlimited)")
     ap.add_argument("--retry-guid-misses", action="store_true",
                     help="re-attempt permits where a prior BSA lookup found no match")
     args = ap.parse_args()
