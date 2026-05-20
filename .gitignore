@@ -1,8 +1,10 @@
-# Local working cache — regenerated from index.html by update_permits.py.
-# index.html is the portable source of truth, so the .db never needs to be committed.
+# Local working cache — regenerated from permits.json.gz by update_permits.py.
 permits.db
 permits.db-journal
 permits.db-wal
+
+# Data blob — hosted on R2, not committed to git.
+permits.json.gz
 
 # Raw scrape exports live in ~/Downloads, not in the repo
 troy_permits_*.xlsx

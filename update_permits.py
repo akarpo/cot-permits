@@ -3,27 +3,29 @@
 update_permits.py — the one script that maintains the Troy permits website.
 
 Each run:
-  1. Opens permits.db (SQLite). If it's missing, bootstraps it from the data
-     already embedded in index.html — so the git repo is the portable source
-     of truth and the .db is just a regenerable local cache.
+  1. Opens permits.db (SQLite). If it's missing, bootstraps it from
+     permits.json.gz (local or R2) — so the .db is a regenerable cache.
   2. Incrementally scrapes apps.troymi.gov newest-first and stops once it has
-     seen several consecutive pages of permits it already has — a routine run
-     fetches only a handful of pages.
+     seen several consecutive pages of permits it already has.
   3. INSERT OR IGNOREs new permits (keyed on Permit Number).
-  4. Regenerates the self-contained index.html from the database.
-  5. git add / commit / push  (so Cloudflare Pages redeploys).
+  4. Writes permits.json.gz (data blob) and index.html (UI shell).
+  5. Uploads permits.json.gz to Cloudflare R2.
+  6. git add / commit / push  (so Cloudflare Pages redeploys index.html).
 
 Usage:
     python3 update_permits.py                 # normal incremental update
     python3 update_permits.py --no-git        # update files only, skip git
+    python3 update_permits.py --no-upload     # skip R2 upload (local dev)
     python3 update_permits.py --full          # ignore stop-condition, scrape every page
     python3 update_permits.py --margin 8      # stop after N consecutive all-known pages
 
 Dependencies: requests, beautifulsoup4, lxml  (all already installed).
+              wrangler CLI for R2 uploads.
 """
 import argparse
 import base64
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -39,8 +41,10 @@ from bs4 import BeautifulSoup
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(HERE, "permits.db")
 INDEX_PATH = os.path.join(HERE, "index.html")
+DATA_GZ_PATH = os.path.join(HERE, "permits.json.gz")
+DATA_R2_DEST = "media/cot-permits/permits.json.gz"
+DATA_R2_URL = "https://media.karpowitsch.org/cot-permits/permits.json.gz"
 RESULTS_URL = "https://apps.troymi.gov/PermitsIssued/Results"
-CF_LIMIT = 25 * 1024 * 1024
 
 # Column order as returned by the Troy endpoint == order used everywhere here.
 COLUMNS = ["Permit Type", "Permit Number", "Date Issued", "Address", "Applicant",
@@ -154,18 +158,32 @@ def insert_rows(conn, rows):
 
 
 def bootstrap_from_index(conn):
-    """Populate an empty DB from the gzipped data embedded in index.html.
-    Also restores prior BSA GUID resolver state from the 13th column tristate
-    (see generate_index docstring) so CI runs don't re-resolve every permit."""
-    if not os.path.exists(INDEX_PATH):
+    """Populate an empty DB from permits.json.gz (local file, R2 download, or
+    legacy embedded blob).  Also restores prior BSA GUID resolver state from
+    the 13th column tristate (see generate_index docstring) so CI runs don't
+    re-resolve every permit."""
+    data = None
+    if os.path.exists(DATA_GZ_PATH):
+        data = json.loads(gzip.decompress(open(DATA_GZ_PATH, "rb").read()))
+        print(f"  bootstrap source: local {os.path.basename(DATA_GZ_PATH)}")
+    if data is None:
+        try:
+            r = requests.get(DATA_R2_URL, timeout=120)
+            r.raise_for_status()
+            data = json.loads(gzip.decompress(r.content))
+            print(f"  bootstrap source: {DATA_R2_URL}")
+        except Exception as e:
+            print(f"  could not fetch from R2: {e}")
+    if data is None and os.path.exists(INDEX_PATH):
+        html = open(INDEX_PATH, encoding="utf-8").read()
+        m = re.search(r'let B64 = "([A-Za-z0-9+/=]+)"', html)
+        if m:
+            data = json.loads(gzip.decompress(base64.b64decode(m.group(1))))
+            print("  bootstrap source: embedded B64 in index.html (legacy)")
+    if data is None:
         return 0
-    html = open(INDEX_PATH, encoding="utf-8").read()
-    m = re.search(r'let B64 = "([A-Za-z0-9+/=]+)"', html)
-    if not m:
-        return 0
-    data = json.loads(gzip.decompress(base64.b64decode(m.group(1))))
     n = insert_rows(conn, data["rows"])
-    print(f"  bootstrapped {n:,} permits from index.html")
+    print(f"  bootstrapped {n:,} permits")
 
     # Replay the resolver-state tristate from the 13th column, if present.
     restored_guids = restored_misses = 0
@@ -387,14 +405,8 @@ def resolve_missing_guids(conn, resolver, limit=None, batch=50, retry_misses=Fal
 
 # ------------------------------------------------------- index.html output ---
 def generate_index(conn):
-    # explicit ORDER BY: a bare SELECT's row order is unspecified in SQLite, so
-    # ordering by the primary key keeps index.html byte-deterministic run to run.
-    # bsa_guid is appended as a 13th column; HEADERS stays at 12, so it
-    # silently powers the deep-link without showing up in any visible row.
-    # 13th column is a tristate so bootstrap_from_index can preserve resolver
-    # state across CI runs (permits.db is gitignored, so index.html *is* the
-    # cross-run store): a full GUID = resolved, '-' = tried but not in BSA,
-    # '' = never tried.
+    # 13th column is a tristate so bootstrap can preserve resolver state across
+    # CI runs: a full GUID = resolved, '-' = tried but not in BSA, '' = never tried.
     rows = [list(r) for r in conn.execute(
         f"SELECT {DB_COLS[0]},{DB_COLS[1]},{DB_COLS[2]},{DB_COLS[3]},{DB_COLS[4]},"
         f"{DB_COLS[5]},{DB_COLS[6]},{DB_COLS[7]},{DB_COLS[8]},{DB_COLS[9]},"
@@ -402,15 +414,33 @@ def generate_index(conn):
         f"COALESCE(bsa_guid, CASE WHEN bsa_resolved_at IS NULL THEN '' ELSE '-' END) "
         f"FROM permits ORDER BY {DB_COLS[1]}")]
     payload = json.dumps({"headers": COLUMNS, "rows": rows}, separators=(",", ":")).encode()
-    b64 = base64.b64encode(gzip.compress(payload, 9)).decode()
-    assert json.loads(gzip.decompress(base64.b64decode(b64)))["rows"][:1] == rows[:1]
-    html = INDEX_TEMPLATE.replace("__DATA__", b64).replace("__COUNT__", f"{len(rows):,}")
+    compressed = gzip.compress(payload, 9)
+    with open(DATA_GZ_PATH, "wb") as f:
+        f.write(compressed)
+    data_hash = hashlib.sha256(compressed).hexdigest()[:8]
+    data_url = f"{DATA_R2_URL}?v={data_hash}"
+    print(f"  wrote {os.path.basename(DATA_GZ_PATH)} ({len(compressed)/1e6:.1f} MB)")
+    html = INDEX_TEMPLATE.replace("__DATA_URL__", data_url).replace("__COUNT__", f"{len(rows):,}")
     with open(INDEX_PATH, "w", encoding="utf-8") as f:
         f.write(html)
-    size = os.path.getsize(INDEX_PATH)
-    flag = "OK" if size <= CF_LIMIT else "!! OVER CLOUDFLARE 25 MiB CAP"
-    print(f"  wrote index.html ({size/1e6:.1f} MB, {flag})")
-    return len(rows), size
+    print(f"  wrote index.html ({os.path.getsize(INDEX_PATH)/1e3:.0f} KB)")
+    return len(rows), data_hash
+
+
+# -------------------------------------------------------------- R2 upload ---
+def upload_to_r2():
+    result = subprocess.run(
+        ["wrangler", "r2", "object", "put", DATA_R2_DEST,
+         "--file", DATA_GZ_PATH,
+         "--content-type", "application/gzip",
+         "--remote"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode == 0:
+        print(f"  uploaded to R2: {DATA_R2_DEST}")
+    else:
+        msg = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "?"
+        raise RuntimeError(f"R2 upload failed: {msg}")
 
 
 # -------------------------------------------------------------------- git ---
@@ -444,6 +474,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--no-git", action="store_true", help="update files only, skip git")
+    ap.add_argument("--no-upload", action="store_true", help="skip R2 upload (local dev)")
     ap.add_argument("--full", action="store_true", help="scrape every page (ignore stop condition)")
     ap.add_argument("--margin", type=int, default=4,
                     help="stop after N consecutive all-known pages (default 4)")
@@ -489,9 +520,15 @@ def main():
     else:
         print("--no-guids: skipping BSA GUID resolution")
 
-    print("regenerating index.html...")
+    print("regenerating files...")
     generate_index(conn)
     conn.close()
+
+    if args.no_upload:
+        print("--no-upload: skipping R2 upload")
+    else:
+        print("uploading data to R2...")
+        upload_to_r2()
 
     if args.no_git:
         print("--no-git: skipping commit/push")
@@ -579,7 +616,7 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
 <body>
 <header>
   <h1>City of Troy &mdash; Permits Issued</h1>
-  <div class="sub">__COUNT__ permits &middot; scraped from apps.troymi.gov &middot; works fully offline</div>
+  <div class="sub">__COUNT__ permits &middot; scraped from apps.troymi.gov</div>
   <div class="controls">
     <span class="step"><b>1</b>
       <details class="multi loading" id="typewrap">
@@ -601,11 +638,11 @@ INDEX_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 </header>
 <main>
-  <div id="note" class="note">Decompressing &amp; indexing __COUNT__ permits&hellip; (one-time, a few seconds)</div>
+  <div id="note" class="note">Downloading permit data&hellip;</div>
   <table id="tbl" hidden><thead id="thead"></thead><tbody id="tbody"></tbody></table>
 </main>
 <script>
-let B64 = "__DATA__";
+const DATA_URL = "__DATA_URL__";
 const LIMIT = 1000;
 const BSA_URL    = "https://bsaonline.com/SiteSearch/BuildingDepartmentRecordSearch?uid=406";
 const BSA_DETAIL = "https://bsaonline.com/CD_RecordDetails/Permit?uid=406&permitId=";
@@ -646,9 +683,11 @@ function markup(raw, marks){
 }
 
 async function boot(){
-  const bin = Uint8Array.from(atob(B64), c => c.charCodeAt(0));
-  B64 = null;
-  const stream = new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"));
+  $("note").innerHTML = "Downloading permit data&hellip;";
+  const resp = await fetch(DATA_URL);
+  if(!resp.ok) throw new Error("data download failed: " + resp.status);
+  $("note").innerHTML = "Decompressing &amp; indexing&hellip;";
+  const stream = resp.body.pipeThrough(new DecompressionStream("gzip"));
   const data = JSON.parse(await new Response(stream).text());
   HEADERS = data.headers;
   ROWS = data.rows;

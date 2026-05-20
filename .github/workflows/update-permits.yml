@@ -29,10 +29,14 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml
+        run: |
+          pip install requests beautifulsoup4 lxml
+          npm install -g wrangler
 
-      - name: Run incremental update (scrape Troy + resolve BSA GUIDs)
+      - name: Run incremental update (scrape Troy + resolve BSA GUIDs + upload to R2)
         run: python update_permits.py --no-git
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Commit and push if index.html changed
         run: |
