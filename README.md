@@ -141,7 +141,7 @@ python3 verify_bsa_guids.py --sample 20 --throttle 0.6
 | `backfill_parallel.py` | Multi-worker bulk GUID resolver for one-off backfill runs. |
 | `verify_bsa_guids.py` | Daily spot-check that stored GUIDs still point at the right BSA records. |
 | `scrape_permits.py` | Original full-database scraper. Kept as a from-scratch rebuild fallback. |
-| `.github/workflows/update-permits.yml` | Daily CI: scrape + resolve GUIDs + upload to R2 + commit + verify. |
+| `.github/workflows/update-permits.yml` | Daily CI: scrape + resolve GUIDs + upload to R2 + commit + verify. The commit step fetches the latest `main` and resets to it before committing, so it never conflicts even if `main` moved during the ~30-minute scrape. |
 
 ## One-time setup
 
