@@ -46,9 +46,15 @@ jobs:
           fi
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Rebase onto latest main before committing so we never conflict.
+          # index.html is fully regenerated each run, so stashing and
+          # re-applying it on top of whatever main looks like now is safe.
+          cp index.html /tmp/index.html
+          git fetch origin main
+          git reset --hard origin/main
+          cp /tmp/index.html index.html
           git add index.html
           git commit -m "chore: update permits ($(date -u +%Y-%m-%d))"
-          git pull --rebase origin main
           git push
 
       - name: Verify BSA GUIDs (daily spot-check)
