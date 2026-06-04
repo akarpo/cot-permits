@@ -429,11 +429,14 @@ def generate_index(conn):
 
 # -------------------------------------------------------------- R2 upload ---
 def upload_to_r2():
+    # --remote targets the real R2 bucket. Without it, wrangler writes to the
+    # local Miniflare simulation and silently no-ops in CI (exit 0, nothing
+    # uploaded). Auth is orthogonal — it comes from CLOUDFLARE_API_TOKEN (CI)
+    # or `wrangler login` (local dev) — so --remote must always be set.
     cmd = ["wrangler", "r2", "object", "put", DATA_R2_DEST,
            "--file", DATA_GZ_PATH,
-           "--content-type", "application/gzip"]
-    if not os.environ.get("CLOUDFLARE_API_TOKEN"):
-        cmd.append("--remote")
+           "--content-type", "application/gzip",
+           "--remote"]
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode == 0:
         print(f"  uploaded to R2: {DATA_R2_DEST}")
