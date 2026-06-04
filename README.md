@@ -176,5 +176,11 @@ python3 verify_bsa_guids.py --sample 20 --throttle 0.6
 - BSA GUID resolution is best-effort — BSA's search wizard isn't a
   documented API and may break if they change their JS. The daily
   verifier guards against silent drift.
+- **R2 uploads require `--remote`.** `wrangler r2 object put` *without*
+  `--remote` writes to the local Miniflare simulation and silently
+  "succeeds" while uploading nothing — which froze the public dataset for
+  9 days in May 2026 (see [`INCIDENT.md`](INCIDENT.md)). Auth
+  (`CLOUDFLARE_API_TOKEN` in CI, or `wrangler login` locally) is *separate*
+  from `--remote`; the upload needs both.
 - Needs a current browser (uses native `DecompressionStream` —
   Safari 16.4+, current Chrome/Firefox).
