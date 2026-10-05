@@ -9,7 +9,8 @@ Each run:
      seen several consecutive pages of permits it already has.
   3. INSERT OR IGNOREs new permits (keyed on Permit Number).
   4. Writes permits.json.gz (data blob) and index.html (UI shell).
-  5. Uploads permits.json.gz to Cloudflare R2.
+  5. Uploads permits.json.gz to Cloudflare R2, then HEADs the public URL and
+     fails unless it serves the exact bytes just written.
   6. git add / commit / push  (so Cloudflare Pages redeploys index.html).
 
 Usage:
@@ -446,6 +447,34 @@ def upload_to_r2():
         raise RuntimeError("R2 upload failed (see wrangler output above)")
 
 
+def verify_r2_upload(data_hash, attempts=3):
+    # wrangler exiting 0 is not proof of an upload: that is exactly how the
+    # May 2026 freeze stayed green for 9 days (INCIDENT.md). So check the
+    # public URL the site loads. It is not edge-cached (cf-cache-status:
+    # DYNAMIC) and R2's ETag is the object's MD5, so a match means R2 now
+    # serves the exact bytes just written.
+    with open(DATA_GZ_PATH, "rb") as f:
+        blob = f.read()
+    want_len, want_md5 = str(len(blob)), hashlib.md5(blob).hexdigest()
+    url = f"{DATA_R2_URL}?v={data_hash}"
+    for attempt in range(1, attempts + 1):
+        try:
+            r = requests.head(url, timeout=30)
+            got = (r.status_code, r.headers.get("Content-Length"),
+                   r.headers.get("ETag", "").strip('"'))
+        except requests.RequestException as e:
+            got = (type(e).__name__, None, None)
+        if got == (200, want_len, want_md5):
+            print(f"  verified R2: {want_len} bytes, md5 {want_md5}")
+            return
+        print(f"  R2 check {attempt}/{attempts}: got (status, length, etag) = {got}",
+              file=sys.stderr)
+        if attempt < attempts:
+            time.sleep(10 * attempt)
+    raise RuntimeError(f"R2 verification failed: {url} is not serving the file just "
+                       f"written ({want_len} bytes, md5 {want_md5})")
+
+
 # -------------------------------------------------------------------- git ---
 def git(*args, check=True):
     return subprocess.run(["git", "-C", HERE, *args], capture_output=True, text=True,
@@ -524,7 +553,7 @@ def main():
         print("--no-guids: skipping BSA GUID resolution")
 
     print("regenerating files...")
-    generate_index(conn)
+    _, data_hash = generate_index(conn)
     conn.close()
 
     if args.no_upload:
@@ -532,6 +561,7 @@ def main():
     else:
         print("uploading data to R2...")
         upload_to_r2()
+        verify_r2_upload(data_hash)
 
     if args.no_git:
         print("--no-git: skipping commit/push")

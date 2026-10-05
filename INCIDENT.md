@@ -78,9 +78,9 @@ cmd = ["wrangler", "r2", "object", "put", DATA_R2_DEST,
 - The R2 timestamp matches the upload moment exactly, and `CLOUDFLARE_API_TOKEN` still has write scope.
 - The next scheduled run should bootstrap 267,341 (not 266,917) and find only a handful of new permits; run time returns to short and stable.
 
-## Follow-ups (recommended, not yet done)
+## Follow-ups
 
-1. **Fail loudly on a stale upload.** The pipeline stayed green while broken for 9 days. After upload, `HEAD` the public URL and assert the returned `content-length`/`etag` matches the file just written (the script already computes `data_hash`). Turns a silent freeze into a red run.
-2. **Pin wrangler.** The workflow runs `npm install -g wrangler` unpinned, so the CLI's behavior/defaults can drift between runs. Pin a known-good major version.
-3. **Gitignore `.wrangler/`.** `.wrangler/cache/wrangler-account.json` is currently tracked; the directory is local wrangler state and should not be committed.
-4. **`.git` is ~129 MB** for a text-only repo — historical large-blob bloat (the data blob was committed before being externalized to R2 on May 20). Optional `git filter-repo` cleanup if clone size becomes annoying.
+1. **Fail loudly on a stale upload.** *Done 2026-10-05:* `verify_r2_upload()` HEADs the public URL after every upload and fails the run unless `content-length` and `etag` (R2's MD5) match the file just written. The pipeline stayed green while broken for 9 days; a repeat now turns the run red.
+2. **Pin wrangler.** *Done 2026-10-05:* the workflow installs `wrangler@4.147.0`, the version the last green runs used, and pins the runner to `ubuntu-24.04` ahead of the `ubuntu-latest` → Ubuntu 26 move on 2026-10-19.
+3. **Gitignore `.wrangler/`.** *Done 2026-10-05:* untracked and gitignored. It was also being served publicly by the site, along with `INCIDENT.md`, `.github/` and the build's `.git/` checkout, because `.assetsignore` is a denylist; all are now listed there.
+4. **`.git` is ~129 MB** (not done) for a text-only repo — historical large-blob bloat (the data blob was committed before being externalized to R2 on May 20). Optional `git filter-repo` cleanup if clone size becomes annoying.

@@ -17,7 +17,8 @@ concurrency:
 
 jobs:
   update:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to Ubuntu 26 from 2026-10-19. Bump deliberately.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -31,7 +32,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install requests beautifulsoup4 lxml
-          npm install -g wrangler
+          # Pinned to the version the last green runs used, so CLI defaults
+          # can't drift under us (see INCIDENT.md). Bump deliberately.
+          npm install -g wrangler@4.147.0
 
       - name: Run incremental update (scrape Troy + resolve BSA GUIDs + upload to R2)
         run: python update_permits.py --no-git --guid-limit 2000

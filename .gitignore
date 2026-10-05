@@ -14,4 +14,7 @@ troy_permits_*.xlsx
 __pycache__/
 *.pyc
 
+# Local wrangler state (account cache, Miniflare simulation)
+.wrangler/
+
 .DS_Store

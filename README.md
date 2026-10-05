@@ -181,6 +181,13 @@ python3 verify_bsa_guids.py --sample 20 --throttle 0.6
   "succeeds" while uploading nothing — which froze the public dataset for
   9 days in May 2026 (see [`INCIDENT.md`](INCIDENT.md)). Auth
   (`CLOUDFLARE_API_TOKEN` in CI, or `wrangler login` locally) is *separate*
-  from `--remote`; the upload needs both.
+  from `--remote`; the upload needs both. Every upload is now checked:
+  the script HEADs the public URL and fails the run unless its length and
+  ETag (MD5) match the file just written.
+- **The workflow pins `wrangler` and the runner image** (`ubuntu-24.04`).
+  Bump them deliberately, not by drift.
+- **`.assetsignore` is a denylist.** Any repo file it doesn't match is
+  served publicly by the site, including the build's `.git/` checkout.
+  Add new non-web files to it.
 - Needs a current browser (uses native `DecompressionStream` —
   Safari 16.4+, current Chrome/Firefox).
